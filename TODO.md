@@ -1,0 +1,7 @@
+- [x] Add Confusion Matrix chart card to Dashboard.tsx
+- [x] Create styled table for confusion matrix visualization
+- [x] Fill table with dynamic values from QKD simulator data
+- [x] Style cells with colors (green for correct, red for errors)
+- [x] Add F1 Score chart and metric display
+- [x] Fix confusion matrix calculation to properly reflect QKD simulator classification
+- [x] Test the dashboard display
