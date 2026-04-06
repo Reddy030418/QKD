@@ -1,27 +1,59 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { toast } from 'react-toastify';
-import { useAuth } from '../context/AuthContext';
+import axios from 'axios';
+import { apiGet } from '../utils/api';
+
+type SessionItem = {
+  id: number;
+  session_id: string;
+  final_key_length: number;
+  quantum_error_rate: number;
+  security_status: 'secure' | 'compromised' | string;
+  status: string;
+  created_at: string;
+};
 
 const HistoryContainer = styled.div`
   max-width: 1400px;
   margin: 0 auto;
   padding: 2rem;
-  transition: all 0.3s ease;
-
-  &:hover {
-    transform: translateY(-5px) scale(1.02);
-    box-shadow: 0 10px 40px rgba(0, 212, 255, 0.3);
-  }
 `;
 
 const Title = styled.h1`
   text-align: center;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
   background: linear-gradient(45deg, #00d4ff, #ff00f7);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  font-size: 2.5rem;
+  font-size: 2.3rem;
+`;
+
+const FiltersRow = styled.div`
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 0.8rem;
+  margin-bottom: 1.2rem;
+
+  @media (max-width: 900px) {
+    grid-template-columns: 1fr;
+  }
+`;
+
+const Input = styled.input`
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 8px;
+  padding: 0.7rem;
+`;
+
+const Select = styled.select`
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 8px;
+  padding: 0.7rem;
 `;
 
 const SessionsGrid = styled.div`
@@ -32,21 +64,15 @@ const SessionsGrid = styled.div`
 const SessionCard = styled.div`
   background: rgba(255, 255, 255, 0.05);
   border-radius: 16px;
-  padding: 1.5rem;
+  padding: 1.2rem;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: all 0.3s ease;
-
-  &:hover {
-    transform: translateY(-2px);
-    border-color: #00d4ff;
-  }
 `;
 
 const SessionHeader = styled.div`
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1rem;
+  margin-bottom: 0.8rem;
 `;
 
 const SessionId = styled.div`
@@ -61,27 +87,25 @@ const StatusBadge = styled.span<{ status: string }>`
   font-size: 0.8rem;
   font-weight: 500;
 
-  ${props => props.status === 'completed' && `
-    background: rgba(0, 255, 136, 0.2);
-    color: #00ff88;
-  `}
+  ${(props) =>
+    props.status === 'completed' &&
+    `
+      background: rgba(0, 255, 136, 0.2);
+      color: #00ff88;
+    `}
 
-  ${props => props.status === 'running' && `
-    background: rgba(255, 170, 0, 0.2);
-    color: #ffaa00;
-  `}
-
-  ${props => props.status === 'error' && `
-    background: rgba(255, 68, 68, 0.2);
-    color: #ff4444;
-  `}
+  ${(props) =>
+    props.status !== 'completed' &&
+    `
+      background: rgba(255, 170, 0, 0.2);
+      color: #ffaa00;
+    `}
 `;
 
 const SessionStats = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 1rem;
-  margin-top: 1rem;
+  gap: 0.8rem;
 `;
 
 const Stat = styled.div`
@@ -90,26 +114,26 @@ const Stat = styled.div`
 
 const StatLabel = styled.div`
   color: #cccccc;
-  font-size: 0.8rem;
-  margin-bottom: 0.25rem;
+  font-size: 0.78rem;
+  margin-bottom: 0.2rem;
 `;
 
 const StatValue = styled.div<{ color?: string }>`
-  font-size: 1.2rem;
+  font-size: 1.05rem;
   font-weight: bold;
-  color: ${props => props.color || '#ffffff'};
+  color: ${(props) => props.color || '#ffffff'};
 `;
 
 const LoadingSpinner = styled.div`
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 200px;
+  height: 180px;
 
   &::after {
     content: '';
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
     border: 3px solid rgba(0, 212, 255, 0.3);
     border-top: 3px solid #00d4ff;
     border-radius: 50%;
@@ -123,47 +147,46 @@ const LoadingSpinner = styled.div`
 `;
 
 const SessionHistory: React.FC = () => {
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const { token } = useAuth();
-
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+  const [search, setSearch] = useState('');
+  const [securityFilter, setSecurityFilter] = useState<'all' | 'secure' | 'compromised'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'running' | 'error'>('all');
 
   useEffect(() => {
+    const fetchSessions = async () => {
+      try {
+        const data = await apiGet<SessionItem[]>('/sessions/');
+        setSessions(data);
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 401) {
+          toast.error('Session expired. Please login again.');
+        } else {
+          toast.error('Failed to load session history.');
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
     fetchSessions();
   }, []);
 
-  const fetchSessions = async () => {
-    if (!token) {
-      setIsLoading(false);
-      return;
-    }
-
-    try {
-      const response = await fetch(`${API_URL}/sessions/`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch sessions');
-      }
-
-      const data = await response.json();
-      setSessions(data);
-    } catch (error) {
-      console.error('Error fetching sessions:', error);
-      toast.error('Failed to load session history');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const filteredSessions = useMemo(() => {
+    return sessions.filter((session) => {
+      const matchSearch =
+        search.trim().length === 0 ||
+        session.session_id.toLowerCase().includes(search.toLowerCase());
+      const matchSecurity = securityFilter === 'all' || session.security_status === securityFilter;
+      const matchStatus = statusFilter === 'all' || session.status === statusFilter;
+      return matchSearch && matchSecurity && matchStatus;
+    });
+  }, [sessions, search, securityFilter, statusFilter]);
 
   if (isLoading) {
     return (
       <HistoryContainer>
-        <Title>📜 Session History</Title>
+        <Title>Session History</Title>
         <LoadingSpinner />
       </HistoryContainer>
     );
@@ -171,21 +194,44 @@ const SessionHistory: React.FC = () => {
 
   return (
     <HistoryContainer>
-      <Title>📜 Session History</Title>
+      <Title>Session History</Title>
 
-      {sessions.length === 0 ? (
+      <FiltersRow>
+        <Input
+          placeholder="Search by session ID"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <Select
+          value={securityFilter}
+          onChange={(e) => setSecurityFilter(e.target.value as 'all' | 'secure' | 'compromised')}
+        >
+          <option value="all">All Security States</option>
+          <option value="secure">Secure Only</option>
+          <option value="compromised">Compromised Only</option>
+        </Select>
+        <Select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as 'all' | 'completed' | 'running' | 'error')}
+        >
+          <option value="all">All Status</option>
+          <option value="completed">Completed</option>
+          <option value="running">Running</option>
+          <option value="error">Error</option>
+        </Select>
+      </FiltersRow>
+
+      {filteredSessions.length === 0 ? (
         <div style={{ textAlign: 'center', color: '#cccccc', marginTop: '2rem' }}>
-          No sessions found. Start by running a QKD simulation!
+          No sessions match the selected filters.
         </div>
       ) : (
         <SessionsGrid>
-          {sessions.map((session) => (
+          {filteredSessions.map((session) => (
             <SessionCard key={session.id}>
               <SessionHeader>
                 <SessionId>{session.session_id}</SessionId>
-                <StatusBadge status={session.status}>
-                  {session.status.toUpperCase()}
-                </StatusBadge>
+                <StatusBadge status={session.status}>{session.status.toUpperCase()}</StatusBadge>
               </SessionHeader>
 
               <SessionStats>
@@ -196,23 +242,21 @@ const SessionHistory: React.FC = () => {
 
                 <Stat>
                   <StatLabel>Error Rate</StatLabel>
-                  <StatValue color={session.quantum_error_rate <= 11 ? '#00ff88' : '#ff4444'}>
+                  <StatValue color={session.quantum_error_rate <= 11 ? '#00ff88' : '#ff557a'}>
                     {session.quantum_error_rate.toFixed(2)}%
                   </StatValue>
                 </Stat>
 
                 <Stat>
                   <StatLabel>Security</StatLabel>
-                  <StatValue color={session.security_status === 'secure' ? '#00ff88' : '#ff4444'}>
+                  <StatValue color={session.security_status === 'secure' ? '#00ff88' : '#ff557a'}>
                     {session.security_status.toUpperCase()}
                   </StatValue>
                 </Stat>
 
                 <Stat>
                   <StatLabel>Created</StatLabel>
-                  <StatValue>
-                    {new Date(session.created_at).toLocaleDateString()}
-                  </StatValue>
+                  <StatValue>{new Date(session.created_at).toLocaleDateString()}</StatValue>
                 </Stat>
               </SessionStats>
             </SessionCard>

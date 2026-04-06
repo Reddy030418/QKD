@@ -13,7 +13,7 @@ import Register from './components/Register';
 import Dashboard from './components/Dashboard';
 
 // Context
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 
 type ThemeMode = 'light' | 'dark';
 
@@ -96,14 +96,7 @@ function App() {
         <AppContainer>
           <Header themeMode={themeMode} onToggleTheme={toggleTheme} />
           <MainContent>
-            <Routes>
-              <Route path="/" element={<Navigate to="/simulator" replace />} />
-              <Route path="/simulator" element={<QKDSimulator />} />
-              <Route path="/sessions" element={<SessionHistory />} />
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/register" element={<Register />} />
-            </Routes>
+            <AppRoutes />
           </MainContent>
         </AppContainer>
         <ToastContainer
@@ -122,5 +115,69 @@ function App() {
     </AuthProvider>
   );
 }
+
+const RouteLoader = () => <div style={{ textAlign: 'center', padding: '2rem' }}>Loading...</div>;
+
+const PrivateRoute: React.FC<{ children: JSX.Element }> = ({ children }) => {
+  const { user, isLoading } = useAuth();
+  if (isLoading) {
+    return <RouteLoader />;
+  }
+  return user ? children : <Navigate to="/login" replace />;
+};
+
+const PublicRoute: React.FC<{ children: JSX.Element }> = ({ children }) => {
+  const { user, isLoading } = useAuth();
+  if (isLoading) {
+    return <RouteLoader />;
+  }
+  return user ? <Navigate to="/simulator" replace /> : children;
+};
+
+const AppRoutes: React.FC = () => (
+  <Routes>
+    <Route path="/" element={<Navigate to="/simulator" replace />} />
+    <Route
+      path="/simulator"
+      element={
+        <PrivateRoute>
+          <QKDSimulator />
+        </PrivateRoute>
+      }
+    />
+    <Route
+      path="/sessions"
+      element={
+        <PrivateRoute>
+          <SessionHistory />
+        </PrivateRoute>
+      }
+    />
+    <Route
+      path="/dashboard"
+      element={
+        <PrivateRoute>
+          <Dashboard />
+        </PrivateRoute>
+      }
+    />
+    <Route
+      path="/login"
+      element={
+        <PublicRoute>
+          <Login />
+        </PublicRoute>
+      }
+    />
+    <Route
+      path="/register"
+      element={
+        <PublicRoute>
+          <Register />
+        </PublicRoute>
+      }
+    />
+  </Routes>
+);
 
 export default App;

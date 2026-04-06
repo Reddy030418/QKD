@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+﻿import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { toast } from 'react-toastify';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuth } from '../context/AuthContext';
+import { fetchApi, getWebSocketCandidates } from '../utils/api';
 
 interface QKDParameters {
   key_length: number;
@@ -10,6 +11,8 @@ interface QKDParameters {
   detector_efficiency: number;
   eavesdropper_present: boolean;
 }
+
+type SocketState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
 interface QKDResult {
   session_id: string;
@@ -24,6 +27,8 @@ interface QKDResult {
   stats: {
     transmitted: number;
     detected: number;
+    qber?: number;
+    key_rate?: number;
     error_rate: number;
     final_key_length: number;
   };
@@ -218,6 +223,27 @@ const StatValue = styled.div<{ status?: 'success' | 'warning' | 'error' }>`
   ${props => props.status === 'error' && 'color: #ff4444;'}
 `;
 
+const stepText: Record<string, string> = {
+  bit_generation: 'Generating bits and bases...',
+  transmission: 'Transmitting and measuring photons...',
+  sifting: 'Sifting key and estimating QBER...',
+  final_key: 'Final key generation...',
+  completed: 'QKD simulation completed successfully!',
+};
+
+const ConnectionBadge = styled.div<{ state: SocketState }>`
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 auto 1rem auto;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: ${({ state }) =>
+    state === 'connected' ? '#00ff88' : state === 'reconnecting' ? '#ffaa00' : '#ff7777'};
+  background: rgba(0, 0, 0, 0.25);
+`;
 const QKDSimulator: React.FC = () => {
   const { token } = useAuth();
   const [parameters, setParameters] = useState<QKDParameters>({
@@ -231,62 +257,143 @@ const QKDSimulator: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentStep, setCurrentStep] = useState<string>('');
+  const [socketState, setSocketState] = useState<SocketState>('disconnected');
 
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const shouldReconnectRef = useRef(true);
+  const activeSessionRef = useRef<string | null>(null);
 
+  const cleanupReconnectTimer = () => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  };
+
+  const sendSubscription = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const sessionId = activeSessionRef.current;
+    if (!sessionId) {
+      return;
+    }
+    wsRef.current.send(JSON.stringify({ type: 'subscribe', session_id: sessionId }));
+  };
+
+  const connectSocket = (manual = false) => {
+    setSocketState(reconnectAttemptRef.current > 0 ? 'reconnecting' : 'connecting');
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const urls = getWebSocketCandidates('/ws/qkd');
+    const primaryUrl = urls[reconnectAttemptRef.current % urls.length];
+    const ws = new WebSocket(primaryUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setSocketState('connected');
+      reconnectAttemptRef.current = 0;
+      sendSubscription();
+      if (!manual) {
+        return;
+      }
+      toast.info('Live QKD channel connected');
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const targetSession = activeSessionRef.current;
+
+        if (payload.type === 'qkd_progress' && payload.session_id === targetSession) {
+          setProgress(payload.progress ?? 0);
+          setCurrentStep(stepText[payload.step] || payload.details?.message || 'Running simulation...');
+        }
+
+        if (payload.type === 'qkd_result' && payload.session_id === targetSession) {
+          setResult(payload.result);
+          setProgress(100);
+          setCurrentStep(stepText.completed);
+          setIsRunning(false);
+        }
+      } catch {
+        // Ignore malformed websocket payloads.
+      }
+    };
+
+    ws.onclose = () => {
+      setSocketState(shouldReconnectRef.current ? 'reconnecting' : 'disconnected');
+      wsRef.current = null;
+      if (!shouldReconnectRef.current) {
+        return;
+      }
+      const attempts = reconnectAttemptRef.current + 1;
+      reconnectAttemptRef.current = attempts;
+      const delay = Math.min(1000 * attempts, 5000);
+      cleanupReconnectTimer();
+      reconnectTimerRef.current = window.setTimeout(() => connectSocket(false), delay);
+    };
+
+    ws.onerror = () => {
+      setSocketState('reconnecting');
+      ws.close();
+    };
+  };
+
+  useEffect(() => {
+    connectSocket(false);
+    return () => {
+      shouldReconnectRef.current = false;
+      cleanupReconnectTimer();
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const createClientSessionId = () => {
+    const rand = Math.random().toString(36).slice(2, 8);
+    return `sess_${Date.now()}_${rand}`;
+  };
+
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+  const sanitizeParameters = (input: QKDParameters): QKDParameters => ({
+    key_length: clamp(Number.isFinite(input.key_length) ? Math.round(input.key_length) : 50, 10, 500),
+    noise_level: clamp(Number.isFinite(input.noise_level) ? input.noise_level : 5.0, 0, 30),
+    detector_efficiency: clamp(Number.isFinite(input.detector_efficiency) ? input.detector_efficiency : 95.0, 70, 100),
+    eavesdropper_present: !!input.eavesdropper_present,
+  });
   const runSimulation = async () => {
     if (!token) {
       toast.error('Please login to run simulations');
       return;
     }
 
+    const sessionId = createClientSessionId();
+    activeSessionRef.current = sessionId;
+    const safeParameters = sanitizeParameters(parameters);
+    setParameters(safeParameters);
+
     setIsRunning(true);
     setProgress(0);
     setResult(null);
-    setCurrentStep('Initializing quantum key distribution...');
+    setCurrentStep('Preparing real-time simulation channel...');
 
     try {
-      // Simulate photon generation animation
-      setCurrentStep('Generating photons...');
-      for (let i = 0; i <= 20; i++) {
-        setProgress(i * 5);
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+      connectSocket(true);
+      sendSubscription();
 
-      setCurrentStep('Encoding bits with quantum states...');
-      for (let i = 20; i <= 40; i++) {
-        setProgress(i);
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      setCurrentStep('Transmitting photons through quantum channel...');
-      for (let i = 40; i <= 60; i++) {
-        setProgress(i);
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      setCurrentStep('Bob measuring photons...');
-      for (let i = 60; i <= 80; i++) {
-        setProgress(i);
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      setCurrentStep('Sifting key and error correction...');
-      for (let i = 80; i <= 95; i++) {
-        setProgress(i);
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      setCurrentStep('Performing privacy amplification...');
-      setProgress(95);
-
-      const response = await fetch(`${API_URL}/qkd/run`, {
+      const response = await fetchApi('/qkd/run', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify(parameters),
+        body: JSON.stringify({ ...safeParameters, session_id: sessionId }),
       });
 
       if (!response.ok) {
@@ -295,28 +402,47 @@ const QKDSimulator: React.FC = () => {
       }
 
       const data = await response.json();
-      setResult(data);
-      setProgress(100);
-      setCurrentStep('QKD simulation completed successfully!');
+      if (!result) {
+        setResult(data);
+        setProgress(100);
+        setCurrentStep(stepText.completed);
+      }
       toast.success('QKD simulation completed successfully!');
-
     } catch (error) {
       console.error('Simulation error:', error);
-      toast.error(error instanceof Error ? error.message : 'Simulation failed');
-    } finally {
       setIsRunning(false);
+      toast.error(error instanceof Error ? error.message : 'Simulation failed');
     }
   };
 
+  
+  const socketStateLabel =
+    socketState === 'connected'
+      ? 'WS Connected'
+      : socketState === 'reconnecting'
+      ? 'WS Reconnecting'
+      : socketState === 'connecting'
+      ? 'WS Connecting'
+      : 'WS Disconnected';
   const resetSimulation = () => {
+    const sessionId = activeSessionRef.current;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && sessionId) {
+      wsRef.current.send(JSON.stringify({ type: 'unsubscribe', session_id: sessionId }));
+    }
+    activeSessionRef.current = null;
     setResult(null);
     setProgress(0);
+    setCurrentStep('');
+    setIsRunning(false);
     toast.info('Simulation reset');
   };
 
   return (
     <SimulatorContainer>
-      <Title>🔬 BB84 Quantum Key Distribution Simulator</Title>
+      <Title>BB84 Quantum Key Distribution Simulator</Title>
+      <div style={{ textAlign: 'center' }}>
+        <ConnectionBadge state={socketState}>{socketStateLabel}</ConnectionBadge>
+      </div>
 
       <ControlsSection>
         <ControlGroup>
@@ -327,7 +453,10 @@ const QKDSimulator: React.FC = () => {
             min="10"
             max="500"
             value={parameters.key_length}
-            onChange={(e) => setParameters({...parameters, key_length: parseInt(e.target.value)})}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              setParameters({...parameters, key_length: Number.isFinite(value) ? value : 50});
+            }}
             disabled={isRunning}
           />
         </ControlGroup>
@@ -341,7 +470,10 @@ const QKDSimulator: React.FC = () => {
             max="30"
             step="0.1"
             value={parameters.noise_level}
-            onChange={(e) => setParameters({...parameters, noise_level: parseFloat(e.target.value)})}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              setParameters({...parameters, noise_level: Number.isFinite(value) ? value : 5.0});
+            }}
             disabled={isRunning}
           />
         </ControlGroup>
@@ -355,7 +487,10 @@ const QKDSimulator: React.FC = () => {
             max="100"
             step="0.1"
             value={parameters.detector_efficiency}
-            onChange={(e) => setParameters({...parameters, detector_efficiency: parseFloat(e.target.value)})}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              setParameters({...parameters, detector_efficiency: Number.isFinite(value) ? value : 95.0});
+            }}
             disabled={isRunning}
           />
         </ControlGroup>
@@ -377,7 +512,7 @@ const QKDSimulator: React.FC = () => {
             onClick={runSimulation}
             disabled={isRunning}
           >
-            {isRunning ? '🔄 Running Simulation...' : '🚀 Run QKD Simulation'}
+            {isRunning ? 'Running Simulation...' : 'Run QKD Simulation'}
           </Button>
 
           <Button
@@ -385,7 +520,7 @@ const QKDSimulator: React.FC = () => {
             onClick={resetSimulation}
             disabled={isRunning}
           >
-            🔄 Reset
+            Reset
           </Button>
         </ButtonGroup>
 
@@ -413,7 +548,7 @@ const QKDSimulator: React.FC = () => {
       {result && (
         <ResultsSection>
           <ResultCard>
-            <ResultTitle>📊 Simulation Results</ResultTitle>
+            <ResultTitle>Simulation Results</ResultTitle>
             <StatsGrid>
               <StatItem>
                 <StatLabel>Final Key Length</StatLabel>
@@ -444,7 +579,7 @@ const QKDSimulator: React.FC = () => {
           </ResultCard>
 
           <ResultCard>
-            <ResultTitle>🔑 Final Shared Key</ResultTitle>
+            <ResultTitle>Final Shared Key</ResultTitle>
             <BitsDisplay>
               {result.final_key.map((bit, index) => (
                 <span
@@ -461,19 +596,19 @@ const QKDSimulator: React.FC = () => {
           </ResultCard>
 
           <ResultCard>
-            <ResultTitle>📈 Protocol Steps</ResultTitle>
+            <ResultTitle>Protocol Steps</ResultTitle>
             <BitsDisplay>
               <div><strong>Alice's Bits:</strong> {result.alice_bits.join('')}</div>
               <div><strong>Alice's Bases:</strong> {result.alice_bases.join('')}</div>
               <div><strong>Bob's Bases:</strong> {result.bob_bases.join('')}</div>
-              <div><strong>Bob's Measurements:</strong> {result.bob_measurements.map(m => m ?? '∅').join('')}</div>
+              <div><strong>Bob's Measurements:</strong> {result.bob_measurements.map(m => m ?? 'Ø').join('')}</div>
               <div><strong>Sifted Key (Alice):</strong> {result.sifted_alice.join('')}</div>
               <div><strong>Sifted Key (Bob):</strong> {result.sifted_bob.join('')}</div>
             </BitsDisplay>
           </ResultCard>
 
           <ResultCard>
-            <ResultTitle>📊 Statistics Chart</ResultTitle>
+            <ResultTitle>Statistics Chart</ResultTitle>
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={[
                 { name: 'Transmitted', value: result.stats.transmitted },
@@ -501,3 +636,8 @@ const QKDSimulator: React.FC = () => {
 };
 
 export default QKDSimulator;
+
+
+
+
+

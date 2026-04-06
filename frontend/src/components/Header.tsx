@@ -138,8 +138,8 @@ const Header: React.FC<HeaderProps> = ({ themeMode, onToggleTheme }) => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     navigate('/login');
   };
 
@@ -151,9 +151,9 @@ const Header: React.FC<HeaderProps> = ({ themeMode, onToggleTheme }) => {
         </Logo>
 
         <NavLinks>
-          <NavLink themeMode={themeMode} to="/simulator">Simulator</NavLink>
-          <NavLink themeMode={themeMode} to="/sessions">Sessions</NavLink>
-          <NavLink themeMode={themeMode} to="/dashboard">Dashboard</NavLink>
+          {user && <NavLink themeMode={themeMode} to="/simulator">Simulator</NavLink>}
+          {user && <NavLink themeMode={themeMode} to="/sessions">Sessions</NavLink>}
+          {user && <NavLink themeMode={themeMode} to="/dashboard">Dashboard</NavLink>}
           <ThemeToggleButton
             themeMode={themeMode}
             onClick={onToggleTheme}

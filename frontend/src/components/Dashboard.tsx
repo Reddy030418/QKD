@@ -1,21 +1,48 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { toast } from 'react-toastify';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
-import { useAuth } from '../context/AuthContext';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, Legend } from 'recharts';
+import axios from 'axios';
+import { apiGet } from '../utils/api';
 
-const DashboardContainer = styled.div<{ scrollY: number }>`
+type SummaryResponse = {
+  total_sessions: number;
+  secure_sessions: number;
+  compromised_sessions: number;
+  secure_ratio: number;
+  compromise_ratio: number;
+  average_qber: number;
+  average_key_rate: number;
+  noise_error_correlation: number;
+};
+
+type TrendsResponse = {
+  qber_trend: { date: string; value: number }[];
+  key_rate_trend: { date: string; value: number }[];
+  security_trend: { date: string; secure: number; compromised: number }[];
+};
+
+type SessionSummaryFallback = {
+  total_sessions: number;
+  successful_sessions: number;
+  compromised_sessions: number;
+  success_rate: number;
+  compromise_rate: number;
+  average_error_rate: number;
+  average_key_length: number;
+  f1_score?: number;
+  confusion_matrix?: {
+    true_positive: number;
+    false_positive: number;
+    true_negative: number;
+    false_negative: number;
+  };
+};
+
+const DashboardContainer = styled.div`
   max-width: 1400px;
   margin: 0 auto;
   padding: 2rem;
-  transition: all 0.3s ease;
-  transform: translateY(${props => -props.scrollY * 0.5}px);
-  opacity: ${props => Math.max(1 - props.scrollY * 0.001, 0.8)};
-
-  &:hover {
-    transform: translateY(${props => -props.scrollY * 0.5 - 5}px) scale(1.02);
-    box-shadow: 0 10px 40px rgba(0, 212, 255, 0.3);
-  }
 `;
 
 const Title = styled.h1`
@@ -24,69 +51,42 @@ const Title = styled.h1`
   background: linear-gradient(45deg, #00d4ff, #ff00f7);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  font-size: 2.5rem;
-  transition: transform 0.3s ease, text-shadow 0.3s ease;
-
-  &:hover {
-    transform: scale(1.05);
-    text-shadow: 0 0 20px rgba(0, 212, 255, 0.5), 0 0 40px rgba(255, 0, 247, 0.5);
-  }
+  font-size: 2.2rem;
 `;
 
 const StatsGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 2rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
   margin-bottom: 2rem;
-`;
-
-const StatValue = styled.div<{ color?: string }>`
-  font-size: 2.5rem;
-  font-weight: bold;
-  margin-bottom: 0.5rem;
-  color: ${props => props.color || '#00d4ff'};
-  transition: transform 0.3s ease;
-`;
-
-const StatLabel = styled.div`
-  color: #cccccc;
-  font-size: 1rem;
-  transition: color 0.3s ease;
 `;
 
 const StatCard = styled.div`
   background: rgba(255, 255, 255, 0.05);
   border-radius: 16px;
-  padding: 1.5rem;
+  padding: 1.2rem;
   border: 1px solid rgba(255, 255, 255, 0.1);
   text-align: center;
-  transition: all 0.3s ease;
-  cursor: pointer;
+`;
 
-  &:hover {
-    transform: translateY(-8px) scale(1.05);
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(0, 212, 255, 0.3);
-    box-shadow: 0 10px 30px rgba(0, 212, 255, 0.2);
-  }
+const StatValue = styled.div<{ color?: string }>`
+  font-size: 2rem;
+  font-weight: bold;
+  color: ${(props) => props.color || '#00d4ff'};
+`;
 
-  &:hover ${StatValue} {
-    transform: scale(1.1);
-    transition: transform 0.3s ease;
-  }
-
-  &:hover ${StatLabel} {
-    color: #00d4ff;
-    transition: color 0.3s ease;
-  }
+const StatLabel = styled.div`
+  color: #cccccc;
+  font-size: 0.9rem;
+  margin-top: 0.4rem;
 `;
 
 const ChartsGrid = styled.div`
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 2rem;
+  gap: 1rem;
 
-  @media (max-width: 768px) {
+  @media (max-width: 900px) {
     grid-template-columns: 1fr;
   }
 `;
@@ -94,17 +94,8 @@ const ChartsGrid = styled.div`
 const ChartCard = styled.div`
   background: rgba(255, 255, 255, 0.05);
   border-radius: 16px;
-  padding: 1.5rem;
+  padding: 1rem;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: all 0.3s ease;
-  cursor: pointer;
-
-  &:hover {
-    transform: translateY(-8px) scale(1.05);
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(0, 212, 255, 0.3);
-    box-shadow: 0 10px 30px rgba(0, 212, 255, 0.2);
-  }
 `;
 
 const ChartTitle = styled.h3`
@@ -117,12 +108,12 @@ const LoadingSpinner = styled.div`
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 200px;
+  height: 180px;
 
   &::after {
     content: '';
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
     border: 3px solid rgba(0, 212, 255, 0.3);
     border-top: 3px solid #00d4ff;
     border-radius: 50%;
@@ -135,631 +126,251 @@ const LoadingSpinner = styled.div`
   }
 `;
 
-const COLORS = ['#00d4ff', '#ff00f7', '#00ff88', '#ffaa00'];
-
-const ConfusionMatrixTable = styled.table`
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0 auto;
-`;
-
-const ConfusionMatrixCell = styled.td<{ isHeader?: boolean; isCorrect?: boolean }>`
-  padding: 1rem;
-  text-align: center;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  font-weight: bold;
-  font-size: 1.2rem;
-  background: ${props => {
-    if (props.isHeader) return 'rgba(255, 255, 255, 0.1)';
-    if (props.isCorrect) return 'rgba(0, 255, 136, 0.3)'; // green for TP/TN
-    return 'rgba(255, 68, 68, 0.3)'; // red for FP/FN
-  }};
-  color: ${props => props.isHeader ? '#00d4ff' : '#fff'};
-`;
-
-const QKDComparisonTable = styled.table`
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0 auto;
-  font-size: 0.9rem;
-`;
-
-const QKDComparisonCell = styled.td<{ isHeader?: boolean; algorithm?: string }>`
-  padding: 0.5rem;
-  text-align: center;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: ${props => {
-    if (props.isHeader) return 'rgba(255, 255, 255, 0.1)';
-    return 'rgba(255, 255, 255, 0.05)';
-  }};
-  color: ${props => props.isHeader ? '#00d4ff' : '#fff'};
-  font-weight: ${props => props.isHeader ? 'bold' : 'normal'};
-`;
-
-const qkdAlgorithmsData = [
-  {
-    feature: 'Year Proposed',
-    BB84: '1984',
-    E91: '1991',
-    B92: '1992',
-    SARG04: '2004',
-    DPS: '2002'
-  },
-  {
-    feature: 'Inventors',
-    BB84: 'Bennett & Brassard',
-    E91: 'Ekert',
-    B92: 'Bennett',
-    SARG04: 'Scarani, Acín, Ribordy & Gisin',
-    DPS: 'Inoue, Waks & Yamamoto'
-  },
-  {
-    feature: 'Quantum Concept',
-    BB84: 'Quantum superposition & no-cloning theorem',
-    E91: 'Quantum entanglement & Bell’s theorem',
-    B92: 'Non-orthogonal quantum states',
-    SARG04: 'Modified BB84 with basis randomization',
-    DPS: 'Phase difference between photon pulses'
-  },
-  {
-    feature: 'Type',
-    BB84: 'Prepare-and-measure',
-    E91: 'Entanglement-based',
-    B92: 'Prepare-and-measure',
-    SARG04: 'Prepare-and-measure',
-    DPS: 'Phase-encoded'
-  },
-  {
-    feature: 'Number of Quantum States Used',
-    BB84: '4 (two bases)',
-    E91: 'Entangled photon pairs',
-    B92: '2 non-orthogonal states',
-    SARG04: '4 (same as BB84)',
-    DPS: 'Continuous phase-shifted pulses'
-  },
-  {
-    feature: 'Key Generation Process',
-    BB84: 'Random bit encoding using photon polarization',
-    E91: 'Measurement correlations from entangled pairs',
-    B92: 'Encodes bits in non-orthogonal states',
-    SARG04: 'Combines BB84 states with additional sifting rule',
-    DPS: 'Encodes key in relative phase difference'
-  },
-  {
-    feature: 'Security Basis',
-    BB84: 'Heisenberg’s uncertainty principle',
-    E91: 'Bell’s inequality violation',
-    B92: 'Non-orthogonality of states',
-    SARG04: 'Statistical detection of eavesdropping',
-    DPS: 'Quantum interference'
-  },
-  {
-    feature: 'Efficiency',
-    BB84: '50% bits used after sifting',
-    E91: 'Low (due to entanglement complexity)',
-    B92: 'Higher than BB84',
-    SARG04: 'Slightly higher than BB84',
-    DPS: 'Very high (no basis mismatch)'
-  },
-  {
-    feature: 'Eavesdropping Detection',
-    BB84: 'Yes — via basis mismatch',
-    E91: 'Yes — via Bell test violation',
-    B92: 'Yes — via error rates',
-    SARG04: 'Yes — via refined sifting',
-    DPS: 'Yes — via phase error rates'
-  },
-  {
-    feature: 'Implementation Difficulty',
-    BB84: 'Simple and widely used',
-    E91: 'Complex (requires entangled photon sources)',
-    B92: 'Simple but less robust',
-    SARG04: 'Moderate',
-    DPS: 'Complex (requires interferometers)'
-  },
-  {
-    feature: 'Key Rate / Speed',
-    BB84: 'Moderate',
-    E91: 'Slow (entanglement limits rate)',
-    B92: 'Moderate',
-    SARG04: 'Moderate to High',
-    DPS: 'High-speed (suitable for telecom)'
-  },
-  {
-    feature: 'Distance Coverage',
-    BB84: '50–150 km (fiber)',
-    E91: 'Up to 300 km (with repeaters)',
-    B92: '~100 km',
-    SARG04: '100–150 km',
-    DPS: '200+ km (with stabilization)'
-  },
-  {
-    feature: 'Security Level',
-    BB84: 'High',
-    E91: 'Very high',
-    B92: 'Moderate',
-    SARG04: 'Higher than BB84 under photon-number-splitting attacks',
-    DPS: 'High (robust for practical systems)'
-  },
-  {
-    feature: 'Practical Usage',
-    BB84: 'Commercial QKD systems',
-    E91: 'Quantum research, satellite QKD',
-    B92: 'Educational demos',
-    SARG04: 'Fiber QKD improvement',
-    DPS: 'Real-world telecom QKD'
-  }
-];
+const COLORS = ['#00d4ff', '#ff557a'];
 
 const Dashboard: React.FC = () => {
-  const [stats, setStats] = useState<any>(null);
+  const [summary, setSummary] = useState<SummaryResponse | null>(null);
+  const [trends, setTrends] = useState<TrendsResponse | null>(null);
+  const [sessionSummary, setSessionSummary] = useState<SessionSummaryFallback | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [scrollY, setScrollY] = useState(0);
-  const { token } = useAuth();
-
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
   useEffect(() => {
-    fetchStats();
-  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const handleScroll = () => {
-      setScrollY(window.scrollY);
+    const load = async () => {
+      try {
+        const [summaryData, trendsData] = await Promise.all([
+          apiGet<SummaryResponse>('/analytics/summary'),
+          apiGet<TrendsResponse>('/analytics/trends?page=1&page_size=30'),
+        ]);
+        setSummary(summaryData);
+        setTrends(trendsData);
+        try {
+          const sessionData = await apiGet<SessionSummaryFallback>('/sessions/stats/summary');
+          setSessionSummary(sessionData);
+        } catch {
+          setSessionSummary(null);
+        }
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 403) {
+          try {
+            const fallback = await apiGet<SessionSummaryFallback>('/sessions/stats/summary');
+            setSessionSummary(fallback);
+            setSummary({
+              total_sessions: fallback.total_sessions,
+              secure_sessions: fallback.successful_sessions,
+              compromised_sessions: fallback.compromised_sessions,
+              secure_ratio: fallback.success_rate,
+              compromise_ratio: fallback.compromise_rate,
+              average_qber: fallback.average_error_rate,
+              average_key_rate: 0,
+              noise_error_correlation: 0,
+            });
+            setTrends({
+              qber_trend: [],
+              key_rate_trend: [],
+              security_trend: [],
+            });
+            toast.info('Showing user-level dashboard data.');
+          } catch {
+            toast.error('Failed to load dashboard analytics.');
+          }
+        } else {
+          toast.error('Failed to load dashboard analytics.');
+        }
+      } finally {
+        setIsLoading(false);
+      }
     };
 
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
+    load();
   }, []);
 
-  const fetchStats = async () => {
-    if (!token) {
-      setIsLoading(false);
-      return;
+  const qberVsKeyRate = useMemo(() => {
+    if (!trends || trends.qber_trend.length === 0) {
+      return [] as { date: string; qber: number; keyRate: number }[];
     }
 
-    try {
-      const response = await fetch(`${API_URL}/sessions/stats/summary`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch statistics');
-      }
-
-      const data = await response.json();
-      setStats(data);
-    } catch (error) {
-      console.error('Error fetching stats:', error);
-      toast.error('Failed to load dashboard statistics');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    const keyRateMap = new Map(trends.key_rate_trend.map((p) => [p.date, p.value]));
+    return trends.qber_trend.map((point) => ({
+      date: point.date,
+      qber: point.value,
+      keyRate: keyRateMap.get(point.date) ?? 0,
+    }));
+  }, [trends]);
 
   if (isLoading) {
     return (
-      <DashboardContainer scrollY={scrollY}>
-        <Title>📊 Dashboard</Title>
+      <DashboardContainer>
+        <Title>QKD Analytics Dashboard</Title>
         <LoadingSpinner />
       </DashboardContainer>
     );
   }
 
-  if (!stats) {
+  if (!summary || !trends) {
     return (
-      <DashboardContainer scrollY={scrollY}>
-        <Title>📊 Dashboard</Title>
-        <div style={{ textAlign: 'center', color: '#cccccc', marginTop: '2rem' }}>
-          Failed to load dashboard data
-        </div>
+      <DashboardContainer>
+        <Title>QKD Analytics Dashboard</Title>
+        <div style={{ textAlign: 'center', color: '#cccccc' }}>Unable to load analytics data.</div>
       </DashboardContainer>
     );
   }
 
-  const pieData = [
-    { name: 'Successful', value: stats.successful_sessions },
-    { name: 'Failed', value: stats.total_sessions - stats.successful_sessions },
-  ];
-
-
-
   return (
-    <DashboardContainer scrollY={scrollY}>
-      <Title>📊 QKD System Dashboard</Title>
+    <DashboardContainer>
+      <Title>QKD Analytics Dashboard</Title>
 
       <StatsGrid>
         <StatCard>
-          <StatValue>{stats.total_sessions}</StatValue>
+          <StatValue>{summary.total_sessions}</StatValue>
           <StatLabel>Total Sessions</StatLabel>
         </StatCard>
-
         <StatCard>
-          <StatValue color="#00ff88">{stats.successful_sessions}</StatValue>
-          <StatLabel>Successful Sessions</StatLabel>
+          <StatValue color="#00ff88">{summary.secure_sessions}</StatValue>
+          <StatLabel>Secure Sessions</StatLabel>
         </StatCard>
-
         <StatCard>
-          <StatValue color="#ff4444">{stats.compromised_sessions}</StatValue>
+          <StatValue color="#ff557a">{summary.compromised_sessions}</StatValue>
           <StatLabel>Compromised Sessions</StatLabel>
         </StatCard>
-
         <StatCard>
-          <StatValue color="#ffaa00">{stats.success_rate.toFixed(1)}%</StatValue>
-          <StatLabel>Success Rate</StatLabel>
+          <StatValue color="#ffaa00">{summary.average_qber.toFixed(2)}%</StatValue>
+          <StatLabel>Average QBER</StatLabel>
         </StatCard>
       </StatsGrid>
 
-      <ChartsGrid style={{ marginBottom: '2rem' }}>
+      <ChartsGrid>
         <ChartCard>
-          <ChartTitle>Session Success Distribution</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <PieChart>
-              <Pie
-                data={pieData}
-                cx="50%"
-                cy="50%"
-                labelLine={false}
-                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                outerRadius={80}
-                fill="#8884d8"
-                dataKey="value"
-              >
-                {pieData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-              />
-            </PieChart>
-          </ResponsiveContainer>
-        </ChartCard>
-
-        <ChartCard>
-          <ChartTitle>Confusion Matrix</ChartTitle>
-          <ConfusionMatrixTable>
-            <thead>
-              <tr>
-                <ConfusionMatrixCell isHeader></ConfusionMatrixCell>
-                <ConfusionMatrixCell isHeader>Predicted Secure</ConfusionMatrixCell>
-                <ConfusionMatrixCell isHeader>Predicted Compromised</ConfusionMatrixCell>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <ConfusionMatrixCell isHeader>Actual Secure</ConfusionMatrixCell>
-                <ConfusionMatrixCell isCorrect={true}>
-                  {stats.confusion_matrix?.true_positive || 0} (TP)
-                </ConfusionMatrixCell>
-                <ConfusionMatrixCell isCorrect={false}>
-                  {stats.confusion_matrix?.false_negative || 0} (FN)
-                </ConfusionMatrixCell>
-              </tr>
-              <tr>
-                <ConfusionMatrixCell isHeader>Actual Compromised</ConfusionMatrixCell>
-                <ConfusionMatrixCell isCorrect={false}>
-                  {stats.confusion_matrix?.false_positive || 0} (FP)
-                </ConfusionMatrixCell>
-                <ConfusionMatrixCell isCorrect={true}>
-                  {stats.confusion_matrix?.true_negative || 0} (TN)
-                </ConfusionMatrixCell>
-              </tr>
-            </tbody>
-          </ConfusionMatrixTable>
-        </ChartCard>
-      </ChartsGrid>
-
-      <ChartsGrid style={{ marginBottom: '2rem' }}>
-        <ChartCard>
-          <ChartTitle>Average Error Rate</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[{ name: 'Error Rate', value: stats.average_error_rate || 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="name" stroke="#ccc" />
-              <YAxis stroke="#ccc" domain={[0, 'dataMax + 5']} />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number) => [`${value.toFixed(2)}%`, 'Error Rate']}
-              />
-              <Bar dataKey="value" fill="#ffaa00" />
-            </BarChart>
-          </ResponsiveContainer>
-          <div style={{ textAlign: 'center', marginTop: '1rem', color: '#cccccc', fontSize: '0.9rem' }}>
-            Current: {stats.average_error_rate?.toFixed(2) || '0.00'}% | Lower is better for QKD security
-          </div>
-        </ChartCard>
-
-        <ChartCard>
-          <ChartTitle>F1 Score</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[{ name: 'F1 Score', value: stats.f1_score || 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="name" stroke="#ccc" />
-              <YAxis domain={[0, 1]} stroke="#ccc" />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number) => [value.toFixed(3), 'F1 Score']}
-              />
-              <Bar dataKey="value" fill="#ff00f7" />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartCard>
-      </ChartsGrid>
-
-      <ChartsGrid style={{ marginBottom: '2rem' }}>
-        <ChartCard>
-          <ChartTitle>ROC Curve - QKD Security Classification</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={[
-              { fpr: 0, tpr: 0 },
-              { fpr: 0.1, tpr: 0.8 },
-              { fpr: 0.2, tpr: 0.9 },
-              { fpr: 0.3, tpr: 0.95 },
-              { fpr: 0.4, tpr: 0.97 },
-              { fpr: 0.5, tpr: 0.98 },
-              { fpr: 0.6, tpr: 0.99 },
-              { fpr: 0.7, tpr: 0.995 },
-              { fpr: 0.8, tpr: 0.997 },
-              { fpr: 0.9, tpr: 0.999 },
-              { fpr: 1, tpr: 1 }
-            ]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis
-                dataKey="fpr"
-                stroke="#ccc"
-                label={{ value: 'False Positive Rate (FPR)', position: 'insideBottom', offset: -5 }}
-                domain={[0, 1]}
-              />
-              <YAxis
-                stroke="#ccc"
-                label={{ value: 'True Positive Rate (TPR)', angle: -90, position: 'insideLeft' }}
-                domain={[0, 1]}
-              />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number, name: string) => [
-                  value.toFixed(3),
-                  name === 'tpr' ? 'True Positive Rate' : 'False Positive Rate'
-                ]}
-                labelFormatter={(label) => `FPR: ${label}`}
-              />
-              <Line
-                type="monotone"
-                dataKey="tpr"
-                stroke="#00d4ff"
-                strokeWidth={3}
-                dot={{ fill: '#00d4ff', strokeWidth: 2, r: 4 }}
-                name="ROC Curve"
-              />
-              <Line
-                type="monotone"
-                dataKey="fpr"
-                stroke="#ff4444"
-                strokeWidth={2}
-                strokeDasharray="5 5"
-                name="Random Guess"
-              />
-            </LineChart>
-          </ResponsiveContainer>
-          <div style={{ textAlign: 'center', marginTop: '1rem', color: '#cccccc', fontSize: '0.9rem' }}>
-            AUC: {(stats.f1_score || 0.85).toFixed(3)} | Perfect classifier approaches (0,1) point
-          </div>
-        </ChartCard>
-
-        <ChartCard>
-          <ChartTitle>Key Length Distribution</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[{ name: 'Average Key Length', value: stats.average_key_length || 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="name" stroke="#ccc" />
-              <YAxis stroke="#ccc" />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number) => [value.toFixed(1), 'Key Length']}
-              />
-              <Bar dataKey="value" fill="#00ff88" />
-            </BarChart>
-          </ResponsiveContainer>
-          <div style={{ textAlign: 'center', marginTop: '1rem', color: '#cccccc', fontSize: '0.9rem' }}>
-            Current: {stats.average_key_length?.toFixed(1) || '0.0'} bits | Higher is better for security
-          </div>
-        </ChartCard>
-      </ChartsGrid>
-
-      <ChartsGrid style={{ marginBottom: '2rem' }}>
-        <ChartCard>
-          <ChartTitle>⚛️ Distance Coverage Comparison (km)</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[
-              { algorithm: 'BB84', distance: 100 },
-              { algorithm: 'E91', distance: 300 },
-              { algorithm: 'B92', distance: 100 },
-              { algorithm: 'SARG04', distance: 125 },
-              { algorithm: 'DPS', distance: 200 }
-            ]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="algorithm" stroke="#ccc" />
-              <YAxis stroke="#ccc" />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number) => [`${value} km`, 'Distance']}
-              />
-              <Bar dataKey="distance" fill="#00d4ff" />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartCard>
-
-        <ChartCard>
-          <ChartTitle>Security Level Comparison</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
+          <ChartTitle>Secure vs Compromised Ratio</ChartTitle>
+          <ResponsiveContainer width="100%" height={280}>
             <PieChart>
               <Pie
                 data={[
-                  { name: 'BB84 - High', value: 3, color: '#00ff88' },
-                  { name: 'E91 - Very High', value: 4, color: '#00d4ff' },
-                  { name: 'B92 - Moderate', value: 2, color: '#ffaa00' },
-                  { name: 'SARG04 - Higher', value: 3.5, color: '#ff00f7' },
-                  { name: 'DPS - High', value: 3, color: '#ff4444' }
+                  { name: 'Secure', value: summary.secure_ratio },
+                  { name: 'Compromised', value: summary.compromise_ratio },
                 ]}
+                dataKey="value"
                 cx="50%"
                 cy="50%"
-                outerRadius={80}
-                dataKey="value"
-                label={({ name }) => name.split(' - ')[0]}
+                outerRadius={90}
+                label={({ name, value }) => `${name} ${Number(value).toFixed(1)}%`}
               >
-                {[
-                  { name: 'BB84 - High', value: 3, color: '#00ff88' },
-                  { name: 'E91 - Very High', value: 4, color: '#00d4ff' },
-                  { name: 'B92 - Moderate', value: 2, color: '#ffaa00' },
-                  { name: 'SARG04 - Higher', value: 3.5, color: '#ff00f7' },
-                  { name: 'DPS - High', value: 3, color: '#ff4444' }
-                ].map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
+                {COLORS.map((color, index) => (
+                  <Cell key={`ratio-cell-${index}`} fill={color} />
                 ))}
               </Pie>
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number, name: string) => [name.split(' - ')[1], 'Security Level']}
-              />
+              <Tooltip formatter={(v: number) => `${v.toFixed(2)}%`} />
             </PieChart>
           </ResponsiveContainer>
         </ChartCard>
-      </ChartsGrid>
 
-      <ChartsGrid style={{ marginBottom: '2rem' }}>
         <ChartCard>
-          <ChartTitle>Implementation Difficulty</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[
-              { algorithm: 'BB84', difficulty: 1 },
-              { algorithm: 'E91', difficulty: 4 },
-              { algorithm: 'B92', difficulty: 2 },
-              { algorithm: 'SARG04', difficulty: 3 },
-              { algorithm: 'DPS', difficulty: 4 }
-            ]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="algorithm" stroke="#ccc" />
-              <YAxis stroke="#ccc" domain={[0, 5]} tickFormatter={(value) => ['Simple', 'Moderate', 'Complex'][value - 1] || ''} />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number) => [['Simple', 'Moderate', 'Complex'][value - 1] || 'Complex', 'Difficulty']}
-              />
-              <Bar dataKey="difficulty" fill="#ffaa00" />
+          <ChartTitle>Security Trend</ChartTitle>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={trends.security_trend}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#2d2d2d" />
+              <XAxis dataKey="date" stroke="#ccc" />
+              <YAxis stroke="#ccc" />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="secure" fill="#00ff88" name="Secure" />
+              <Bar dataKey="compromised" fill="#ff557a" name="Compromised" />
             </BarChart>
           </ResponsiveContainer>
-          <div style={{ textAlign: 'center', marginTop: '1rem', color: '#cccccc', fontSize: '0.9rem' }}>
-            1 = Simple, 2 = Moderate, 3 = Complex, 4 = Very Complex
-          </div>
         </ChartCard>
 
         <ChartCard>
-          <ChartTitle>Key Rate / Speed Comparison</ChartTitle>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={[
-              { algorithm: 'BB84', speed: 2 },
-              { algorithm: 'E91', speed: 1 },
-              { algorithm: 'B92', speed: 2 },
-              { algorithm: 'SARG04', speed: 3 },
-              { algorithm: 'DPS', speed: 4 }
-            ]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-              <XAxis dataKey="algorithm" stroke="#ccc" />
-              <YAxis stroke="#ccc" domain={[0, 5]} tickFormatter={(value) => ['Slow', 'Moderate', 'High'][value - 1] || ''} />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #00d4ff',
-                  borderRadius: '8px'
-                }}
-                formatter={(value: number) => [['Slow', 'Moderate', 'High'][value - 1] || 'High-Speed', 'Speed']}
-              />
-              <Bar dataKey="speed" fill="#00ff88" />
-            </BarChart>
+          <ChartTitle>QBER and Key Rate Trends</ChartTitle>
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={qberVsKeyRate}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#2d2d2d" />
+              <XAxis dataKey="date" stroke="#ccc" />
+              <YAxis yAxisId="left" stroke="#ffaa00" />
+              <YAxis yAxisId="right" orientation="right" stroke="#00d4ff" />
+              <Tooltip />
+              <Legend />
+              <Line yAxisId="left" type="monotone" dataKey="qber" stroke="#ffaa00" name="QBER (%)" />
+              <Line yAxisId="right" type="monotone" dataKey="keyRate" stroke="#00d4ff" name="Key Rate" />
+            </LineChart>
           </ResponsiveContainer>
-          <div style={{ textAlign: 'center', marginTop: '1rem', color: '#cccccc', fontSize: '0.9rem' }}>
-            1 = Slow, 2 = Moderate, 3 = High, 4 = High-Speed
-          </div>
+        </ChartCard>
+
+        <ChartCard>
+          <ChartTitle>Derived Security Metrics</ChartTitle>
+          <StatsGrid>
+            <StatCard>
+              <StatValue color="#00d4ff">{summary.average_key_rate.toFixed(4)}</StatValue>
+              <StatLabel>Average Key Rate</StatLabel>
+            </StatCard>
+            <StatCard>
+              <StatValue color="#ffaa00">{summary.noise_error_correlation.toFixed(3)}</StatValue>
+              <StatLabel>Noise-Error Correlation</StatLabel>
+            </StatCard>
+            <StatCard>
+              <StatValue color="#ff557a">
+                {sessionSummary?.f1_score !== undefined ? sessionSummary.f1_score.toFixed(3) : '0.000'}
+              </StatValue>
+              <StatLabel>F1 Score</StatLabel>
+            </StatCard>
+          </StatsGrid>
         </ChartCard>
       </ChartsGrid>
 
-      <ChartCard style={{ marginBottom: '2rem' }}>
-        <ChartTitle>⚛️ QKD Algorithms Summary</ChartTitle>
-        <div style={{ textAlign: 'center', marginTop: '1rem', color: '#cccccc', fontSize: '0.9rem' }}>
-          🟦 BB84 – Standard and easiest to implement, forms the base of most QKD systems.<br/>
-          🟩 E91 – Strongest security using entanglement, but complex setup.<br/>
-          🟨 B92 – Simplified version of BB84, less secure but efficient.<br/>
-          🟧 SARG04 – Improved BB84 to resist photon-number-splitting attacks.<br/>
-          🟥 DPS – Ideal for high-speed and long-distance QKD networks.
-        </div>
-      </ChartCard>
-
-      <ChartCard>
-        <ChartTitle>Key Performance Metrics</ChartTitle>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginTop: '1rem' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#00ff88' }}>
-              {stats.average_key_length.toFixed(1)}
+      {sessionSummary?.confusion_matrix && (
+        <ChartsGrid style={{ marginTop: '1rem' }}>
+          <ChartCard>
+            <ChartTitle>Confusion Matrix</ChartTitle>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '0.8rem',
+                textAlign: 'center',
+              }}
+            >
+              <StatCard>
+                <StatValue color="#00ff88">{sessionSummary.confusion_matrix.true_positive}</StatValue>
+                <StatLabel>True Positive (TP)</StatLabel>
+              </StatCard>
+              <StatCard>
+                <StatValue color="#ff557a">{sessionSummary.confusion_matrix.false_positive}</StatValue>
+                <StatLabel>False Positive (FP)</StatLabel>
+              </StatCard>
+              <StatCard>
+                <StatValue color="#00d4ff">{sessionSummary.confusion_matrix.true_negative}</StatValue>
+                <StatLabel>True Negative (TN)</StatLabel>
+              </StatCard>
+              <StatCard>
+                <StatValue color="#ffaa00">{sessionSummary.confusion_matrix.false_negative}</StatValue>
+                <StatLabel>False Negative (FN)</StatLabel>
+              </StatCard>
             </div>
-            <div style={{ color: '#cccccc' }}>Average Key Length</div>
-          </div>
+          </ChartCard>
 
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#ffaa00' }}>
-              {stats.compromise_rate.toFixed(1)}%
-            </div>
-            <div style={{ color: '#cccccc' }}>Compromise Rate</div>
-          </div>
-
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#00d4ff' }}>
-              {stats.average_error_rate.toFixed(2)}%
-            </div>
-            <div style={{ color: '#cccccc' }}>Avg Error Rate</div>
-          </div>
-
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#ff00f7' }}>
-              {stats.f1_score?.toFixed(3) || '0.000'}
-            </div>
-            <div style={{ color: '#cccccc' }}>F1 Score</div>
-          </div>
-        </div>
-      </ChartCard>
+          <ChartCard>
+            <ChartTitle>ROC Curve (Approximation)</ChartTitle>
+            <ResponsiveContainer width="100%" height={280}>
+              <LineChart
+                data={[
+                  { fpr: 0, tpr: 0 },
+                  { fpr: 0.2, tpr: 0.75 },
+                  { fpr: 0.4, tpr: 0.85 },
+                  { fpr: 0.6, tpr: 0.92 },
+                  { fpr: 0.8, tpr: 0.97 },
+                  { fpr: 1, tpr: 1 },
+                ]}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#2d2d2d" />
+                <XAxis dataKey="fpr" stroke="#ccc" />
+                <YAxis stroke="#ccc" />
+                <Tooltip />
+                <Legend />
+                <Line type="monotone" dataKey="tpr" stroke="#00d4ff" name="ROC Curve" />
+                <Line type="monotone" dataKey="fpr" stroke="#ff557a" strokeDasharray="5 5" name="Random" />
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </ChartsGrid>
+      )}
     </DashboardContainer>
   );
 };

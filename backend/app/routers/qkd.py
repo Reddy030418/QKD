@@ -1,96 +1,90 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from typing import Dict, Any
 import logging
 from ..core.database import get_db
+from ..core.rate_limit import simulation_rate_limit
 from ..services.qkd_service import qkd_service
+from ..services.auth_service import require_roles
+from ..models import User
 from ..websockets.manager import manager
+from ..schemas import QKDRunRequest, QKDRunResponse, QKDSessionInfoResponse, QKDSystemStatsResponse
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-@router.post("/run", response_model=Dict[str, Any])
+@router.post("/run", response_model=QKDRunResponse)
 async def run_qkd_protocol(
-    parameters: Dict[str, Any],
-    db: Session = Depends(get_db)
+    payload: QKDRunRequest,
+    request: Request,
+    current_user: User = Depends(require_roles("admin", "user")),
 ):
-    """Run the BB84 QKD protocol with given parameters"""
+    """Run the BB84 QKD protocol with given parameters."""
+    simulation_rate_limit(request)
     try:
-        # Validate parameters
-        key_length = parameters.get('key_length', 50)
-        noise_level = parameters.get('noise_level', 5.0)
-        detector_efficiency = parameters.get('detector_efficiency', 95.0)
-        eavesdropper_present = parameters.get('eavesdropper_present', False)
+        parameters = payload.dict()
+        logger.info("Starting QKD protocol for user=%s with parameters=%s", current_user.username, parameters)
 
-        # Validate parameter ranges
-        if not (10 <= key_length <= 500):
-            raise HTTPException(status_code=400, detail="Key length must be between 10 and 500")
+        result = await qkd_service.run_bb84_protocol(parameters, user_id=current_user.id)
 
-        if not (0 <= noise_level <= 30):
-            raise HTTPException(status_code=400, detail="Noise level must be between 0 and 30")
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["error"])
 
-        if not (70 <= detector_efficiency <= 100):
-            raise HTTPException(status_code=400, detail="Detector efficiency must be between 70 and 100")
+        await manager.send_qkd_result(result["session_id"], result)
 
-        logger.info(f"Starting QKD protocol with parameters: {parameters}")
+        logger.info("QKD protocol completed successfully for session %s", result["session_id"])
 
-        # Run the QKD protocol
-        result = await qkd_service.run_bb84_protocol(parameters)
-
-        if result['status'] == 'error':
-            raise HTTPException(status_code=500, detail=result['error'])
-
-        # Send real-time updates via WebSocket
-        await manager.send_qkd_result(result['session_id'], result)
-
-        logger.info(f"QKD protocol completed successfully for session {result['session_id']}")
-
-        return result
+        return QKDRunResponse(**result)
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error running QKD protocol: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    except Exception:
+        logger.exception("Error running QKD protocol")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-@router.get("/session/{session_id}", response_model=Dict[str, Any])
+
+@router.get("/session/{session_id}", response_model=QKDSessionInfoResponse)
 async def get_qkd_session(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "user")),
 ):
-    """Get QKD session details by session ID"""
+    """Get QKD session details by session ID."""
     try:
-        # This would typically query the database for session details
-        # For now, return a placeholder response
         return {
-            'session_id': session_id,
-            'status': 'completed',
-            'message': 'Session details would be retrieved from database'
+            "session_id": session_id,
+            "status": "completed",
+            "message": "Session details would be retrieved from database",
+            "requested_by": current_user.username,
         }
-    except Exception as e:
-        logger.error(f"Error retrieving QKD session {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
+    except Exception:
+        logger.exception("Error retrieving QKD session %s", session_id)
+        raise HTTPException(status_code=500, detail="Error retrieving session")
 
-@router.get("/stats", response_model=Dict[str, Any])
-async def get_qkd_stats(db: Session = Depends(get_db)):
-    """Get QKD system statistics"""
+
+@router.get("/stats", response_model=QKDSystemStatsResponse)
+async def get_qkd_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "user")),
+):
+    """Get QKD system statistics."""
     try:
-        # This would typically query the database for statistics
-        # For now, return placeholder statistics
         return {
-            'total_sessions': 0,
-            'successful_sessions': 0,
-            'average_key_length': 0,
-            'average_error_rate': 0.0,
-            'security_incidents': 0
+            "total_sessions": 0,
+            "successful_sessions": 0,
+            "average_key_length": 0,
+            "average_error_rate": 0.0,
+            "security_incidents": 0,
+            "requested_by": current_user.username,
         }
-    except Exception as e:
-        logger.error(f"Error retrieving QKD statistics: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving statistics: {str(e)}")
+    except Exception:
+        logger.exception("Error retrieving QKD statistics")
+        raise HTTPException(status_code=500, detail="Error retrieving statistics")
+
 
 @router.websocket("/ws")
 async def qkd_websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time QKD updates"""
+    """WebSocket endpoint for real-time QKD updates."""
     await manager.connect(websocket)
     try:
         while True:
