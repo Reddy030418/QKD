@@ -1,0 +1,5 @@
+# Project requirements entrypoint
+# Install from project root with:
+#   python -m pip install -r requrement.txt
+
+-r backend/requirements.txt
